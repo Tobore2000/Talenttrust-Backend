@@ -4,11 +4,30 @@ import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
 import { docsCsp, docsHtml } from '../src/openapi';
 import { normalizeOrigin, parseOrigins } from '../src/cors';
+import { bearerToken, secureEqual } from '../src/utils/secureCompare';
 
 const ALLOWED = 'https://allowed.example';
 const app = createApp(new EscrowStore(), [ALLOWED, 'http://localhost:3000']);
 
 const sha256Source = (source: string) => `'sha256-${createHash('sha256').update(source, 'utf8').digest('base64')}'`;
+
+describe('secure comparison utilities', () => {
+  it('compares equal, unequal, different-length, and empty values', () => {
+    expect(secureEqual('secret', 'secret')).toBe(true);
+    expect(secureEqual('secret', 'secreu')).toBe(false);
+    expect(secureEqual('secret', 'secret-longer')).toBe(false);
+    expect(secureEqual('', '')).toBe(true);
+    expect(secureEqual('', 'not-empty')).toBe(false);
+  });
+
+  it('parses bearer tokens and rejects missing or malformed headers', () => {
+    expect(bearerToken('Bearer token')).toBe('token');
+    expect(bearerToken('bEaReR token')).toBe('token');
+    expect(bearerToken(undefined)).toBeUndefined();
+    expect(bearerToken('Basic token')).toBeUndefined();
+    expect(bearerToken('Bearer ')).toBeUndefined();
+  });
+});
 
 describe('CORS origin allowlist', () => {
   it('normalises origins', () => {
