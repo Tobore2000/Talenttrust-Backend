@@ -31,7 +31,6 @@ import { InMemoryEventStore } from './indexer/store';
 import { EventIndexer } from './indexer/indexer';
 import {
   DEFAULT_WEBHOOK_HISTORY_LIMIT,
-  isWebhookAdminTokenValid,
   MAX_WEBHOOK_HISTORY_LIMIT,
   WEBHOOK_DELIVERY_STATUSES,
   WebhookDeliveryStatus,
@@ -64,14 +63,15 @@ import { createLogger, type Logger, randomUUID } from './logger';
 import { ChainReader, SorobanRpcChainReader } from './chain';
 import { buildEscrowTransaction, TxBuildError, type RpcClient } from './stellar/escrowTxBuilder';
 import { bigIntReplacer } from './amount';
-import { createRegistry, type Registry, HTTP_DURATION_BUCKETS, constantTimeEqual } from './metrics';
-import { createHash, createHmac, timingSafeEqual } from 'crypto';
+import { createRegistry, type Registry, HTTP_DURATION_BUCKETS } from './metrics';
+import { createHash, createHmac } from 'crypto';
 import { StrKey, Keypair } from '@stellar/stellar-sdk';
 import { randomBytes } from 'crypto';
 import { buildChallenge, verifyChallenge, consumeNonce } from './auth/challenge';
 import { issueWalletToken } from './auth/jwt';
 import { createRequireAuth, WalletAuthRequest } from './auth/middleware';
 import { ReceiptManager, hashContractState, verifyReceipt } from './receipts';
+import { bearerToken, secureEqual } from './utils/secureCompare';
 
 declare global {
   namespace Express {
@@ -205,11 +205,8 @@ function parseFields(req: Request) {
 function requireAdminRead(req: Request, _res: Response, next: NextFunction) {
   const expected = process.env.ADMIN_READ_TOKEN;
   if (!expected) return next(new HttpError(404, 'admin_not_configured', 'Admin endpoints are not configured'));
-  const auth = req.headers.authorization;
-  const token = auth?.startsWith('Bearer ') ? auth.slice('Bearer '.length) : undefined;
-  const a = Buffer.from(expected);
-  const b = Buffer.from(token ?? '');
-  if (!token || a.length !== b.length || !timingSafeEqual(a, b)) {
+  const token = bearerToken(req.headers.authorization);
+  if (!token || !secureEqual(token, expected)) {
     return next(new HttpError(401, 'unauthorized', 'Missing or invalid admin bearer token'));
   }
   next();
@@ -259,12 +256,8 @@ function disputeLimit(value: unknown): number {
 const requireCronSecret = (req: Request) => {
   const expected = process.env.CRON_SECRET;
   if (!expected) throw new HttpError(404, 'not_found', 'Cron endpoint is not configured');
-  const supplied = req.get('authorization')?.match(/^Bearer\s+(.+)$/i)?.[1];
-  if (!supplied) throw new HttpError(401, 'cron_unauthorized', 'Valid bearer authorization is required');
-  // Compare fixed-length digests so the comparison is constant-time and length-independent.
-  const expectedBytes = createHash('sha256').update(expected).digest();
-  const suppliedBytes = createHash('sha256').update(supplied).digest();
-  if (!timingSafeEqual(expectedBytes, suppliedBytes)) {
+  const supplied = bearerToken(req.get('authorization'));
+  if (!supplied || !secureEqual(supplied, expected)) {
     throw new HttpError(401, 'cron_unauthorized', 'Valid bearer authorization is required');
   }
 };
@@ -323,12 +316,6 @@ function conditionalGet(req: Request, res: Response, etag: string): boolean {
 
 const CURSOR_SECRET = process.env.CURSOR_SECRET || randomBytes(32).toString('base64url');
 
-function safeEqual(a: string, b: string): boolean {
-  const ba = Buffer.from(a, 'utf8');
-  const bb = Buffer.from(b, 'utf8');
-  return ba.length === bb.length && timingSafeEqual(ba, bb);
-}
-
 function parseLimit(v: unknown): number {
   if (v === undefined) return 20;
   const n = Number(v);
@@ -360,7 +347,7 @@ function parseCursorParam(cursor: unknown, sort: string): Cursor | undefined {
   if (parts.length !== 2) throw new HttpError(400, 'invalid_cursor', 'invalid cursor');
   const [payload, sig] = parts;
   const expected = createHmac('sha256', CURSOR_SECRET).update(payload).digest('base64url');
-  if (!safeEqual(sig, expected)) throw new HttpError(400, 'invalid_cursor', 'invalid cursor');
+  if (!secureEqual(sig, expected)) throw new HttpError(400, 'invalid_cursor', 'invalid cursor');
   let obj: { sort?: unknown; lastValue?: unknown; lastId?: unknown };
   try {
     obj = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
@@ -1407,7 +1394,8 @@ export function createApp(
   const webhookAuth = (req: Request) => {
     const configured = process.env.WEBHOOK_ADMIN_TOKEN;
     if (!configured) throw new HttpError(404, 'not_found', 'Not found');
-    if (!isWebhookAdminTokenValid(configured, req.header('authorization'))) {
+    const token = bearerToken(req.header('authorization'));
+    if (!token || !secureEqual(token, configured)) {
       throw new HttpError(401, 'unauthorized', 'Webhook administration authentication is required');
     }
   };
@@ -1590,8 +1578,8 @@ export function createApp(
   // Event indexer batch (Vercel cron sends GET). Fails closed (401) without CRON_SECRET.
   const indexEvents = wrap(async (req) => {
     const expected = process.env.CRON_SECRET;
-    const supplied = req.get('authorization')?.match(/^Bearer\s+(.+)$/i)?.[1];
-    if (!expected || !supplied || !safeEqual(createHash('sha256').update(supplied).digest('hex'), createHash('sha256').update(expected).digest('hex'))) {
+    const supplied = bearerToken(req.get('authorization'));
+    if (!expected || !supplied || !secureEqual(supplied, expected)) {
       throw new HttpError(401, 'unauthorized', 'Valid bearer authorization is required');
     }
     const limitParam = typeof req.query.limit === 'string' && /^[1-9]\d*$/.test(req.query.limit) ? Number(req.query.limit) : undefined;
@@ -1627,8 +1615,8 @@ export function createApp(
   app.get('/metrics', (req, res, next) => {
     const token = process.env.METRICS_TOKEN;
     if (!token) return next(new HttpError(404, 'not_found', 'Metrics endpoint disabled'));
-    const auth = req.headers.authorization;
-    if (!auth || !constantTimeEqual(auth, `Bearer ${token}`)) {
+    const supplied = bearerToken(req.headers.authorization);
+    if (!supplied || !secureEqual(supplied, token)) {
       return next(new HttpError(401, 'unauthorized', 'Invalid metrics token'));
     }
     const stats = store.stats();

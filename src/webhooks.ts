@@ -1,10 +1,11 @@
-import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
+import { createHmac, randomBytes, randomUUID } from 'crypto';
 import { request as httpRequest } from 'http';
 import { request as httpsRequest } from 'https';
 import { lookup } from 'dns/promises';
 import { isIP } from 'net';
 import { EscrowEvent, StoreEventEmitter, WebhookEventType, WEBHOOK_EVENT_TYPES } from './events';
 import { HttpError } from './store';
+import { secureEqual } from './utils/secureCompare';
 
 export interface WebhookSubscriptionPublic {
   id: string;
@@ -177,12 +178,6 @@ const defaultHttpClient: WebhookHttpClient = (url, body, headers, timeoutMs) => 
   request.end(body);
 });
 
-const safeEqual = (left: Buffer, right: Buffer): boolean => {
-  const a = createHash('sha256').update(left).digest();
-  const b = createHash('sha256').update(right).digest();
-  return timingSafeEqual(a, b) && left.length === right.length;
-};
-
 export function verifyWebhookSignature(secret: string, headers: Record<string, string | string[] | undefined>, rawBody: string, toleranceSec = 300): boolean {
   const get = (name: string) => {
     const key = Object.keys(headers).find((candidate) => candidate.toLowerCase() === name.toLowerCase());
@@ -196,13 +191,7 @@ export function verifyWebhookSignature(secret: string, headers: Record<string, s
   const received = signature.match(/^sha256=([0-9a-f]{64})$/i)?.[1];
   if (!received) return false;
   const expected = createHmac('sha256', secret).update(`${timestamp}.${rawBody}`).digest('hex');
-  return safeEqual(Buffer.from(received, 'hex'), Buffer.from(expected, 'hex'));
-}
-
-export function isWebhookAdminTokenValid(configured: string | undefined, authorization: string | undefined): boolean {
-  if (!configured || !authorization?.startsWith('Bearer ')) return false;
-  const presented = authorization.slice('Bearer '.length);
-  return safeEqual(createHash('sha256').update(presented).digest(), createHash('sha256').update(configured).digest());
+  return secureEqual(received, expected);
 }
 
 const publicSubscription = (subscription: WebhookSubscription): WebhookSubscriptionPublic => {

@@ -1,7 +1,6 @@
 import request from 'supertest';
 import { createApp } from '../src/app';
 import { EscrowStore } from '../src/store';
-import { constantTimeEqual } from '../src/metrics';
 
 function metricLine(body: string, name: string, labels: Record<string, string>): string | undefined {
   const labelPairs = Object.entries(labels)
@@ -23,14 +22,6 @@ function metricValue(body: string, name: string, labels: Record<string, string>)
 describe('Prometheus metrics', () => {
   afterEach(() => {
     delete process.env.METRICS_TOKEN;
-  });
-
-  it('constant-time token comparison', () => {
-    expect(constantTimeEqual('abc', 'abc')).toBe(true);
-    expect(constantTimeEqual('abc', 'abd')).toBe(false);
-    expect(constantTimeEqual('abc', 'abcd')).toBe(false);
-    expect(constantTimeEqual('Bearer x', 'Bearer y')).toBe(false);
-    expect(constantTimeEqual('', '')).toBe(true);
   });
 
   it('returns 404 when METRICS_TOKEN is unset', async () => {
